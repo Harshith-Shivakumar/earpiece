@@ -68,18 +68,21 @@ docker_mode() {
 
 # ---------------------------------------------------------------- Linux: systemd user service
 systemd_mode() {
+  # install.sh writes "system" (run as root) or "user" (everyone else).
+  local sctl="systemctl --user" journal="journalctl --user"
+  if [ "$(cat "$DATA_DIR/systemd-scope" 2>/dev/null)" = "system" ]; then sctl="systemctl"; journal="journalctl"; fi
   case "$CMD" in
-    start) systemctl --user start earpiece; sleep 3; echo "Running. $(health_local)" ;;
-    stop) echo "Stopping (sends voice-off to an open chat first; can take up to a minute)..."; systemctl --user stop earpiece; echo "Stopped." ;;
-    restart) systemctl --user restart earpiece; sleep 3; echo "Running. $(health_local)" ;;
+    start) $sctl start earpiece; sleep 3; echo "Running. $(health_local)" ;;
+    stop) echo "Stopping (sends voice-off to an open chat first; can take up to a minute)..."; $sctl stop earpiece; echo "Stopped." ;;
+    restart) $sctl restart earpiece; sleep 3; echo "Running. $(health_local)" ;;
     status)
-      if systemctl --user is-active --quiet earpiece; then
+      if $sctl is-active --quiet earpiece; then
         local h; h="$(health_local)"
         if [ -n "$h" ]; then echo "Running. $h"; else echo "Service running, bridge not answering yet. See: earpiece logs"; fi
       else
         echo "Not running."
       fi ;;
-    logs) journalctl --user -u earpiece -n 40 -f ;;
+    logs) $journal -u earpiece -n 40 -f ;;
     pair) local node; node="$(find_node)" || { echo "Node 22+ needed." >&2; exit 1; }; cd "$BRIDGE_DIR" && exec "$node" bin/pair.js ;;
     *) usage ;;
   esac

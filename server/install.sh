@@ -63,6 +63,7 @@ fi
 # 3. The `earpiece` command.
 mkdir -p "$HOME/.local/bin"
 ln -sf "$REPO/bridge/bin/earpiece" "$HOME/.local/bin/earpiece"
+if [ "$(id -u)" = 0 ]; then ln -sf "$REPO/bridge/bin/earpiece" /usr/local/bin/earpiece; fi
 echo "$MODE" > "$DATA/mode"
 
 if [ "$MODE" = "docker" ]; then
@@ -116,8 +117,13 @@ else
   echo "Node: $NODE ($("$NODE" --version))"
   echo "$NODE" > "$DATA/node"
 
-  say "Installing the systemd user service"
-  UNIT_DIR="$HOME/.config/systemd/user"
+  if [ "$(id -u)" = 0 ]; then
+    say "Installing the systemd service (system-wide, running as root)"
+    UNIT_DIR=/etc/systemd/system; SCTL="systemctl"; echo system > "$DATA/systemd-scope"
+  else
+    say "Installing the systemd user service"
+    UNIT_DIR="$HOME/.config/systemd/user"; SCTL="systemctl --user"; echo user > "$DATA/systemd-scope"
+  fi
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_DIR/earpiece.service" <<UNIT
 [Unit]
@@ -129,16 +135,17 @@ WorkingDirectory=$REPO/bridge
 ExecStart=$NODE $REPO/bridge/src/server.js
 Environment=PATH=$HOME/.local/bin:$(dirname "$NODE"):/usr/local/bin:/usr/bin:/bin
 Environment=DISABLE_AUTOUPDATER=1
+Environment=HOME=$HOME
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=75
 
 [Install]
-WantedBy=default.target
+WantedBy=$([ "$(id -u)" = 0 ] && echo multi-user.target || echo default.target)
 UNIT
-  systemctl --user daemon-reload
-  systemctl --user enable --now earpiece
-  if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != "yes" ]; then
+  $SCTL daemon-reload
+  $SCTL enable --now earpiece
+  if [ "$(id -u)" != 0 ] && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != "yes" ]; then
     echo
     echo "So the bridge keeps running after you log out, run once:"
     echo "  sudo loginctl enable-linger $(id -un)"
