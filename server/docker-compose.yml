@@ -1,0 +1,35 @@
+# Earpiece bridge in Docker. Values come from server/.env, written by install-docker.sh.
+#   docker compose up -d      start
+#   docker compose down       stop
+#   docker compose logs -f    follow the log
+# GPU access: add -f docker-compose.gpu.yml (install-docker.sh does this when nvidia-smi works).
+services:
+  bridge:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+      args:
+        INSTALL_CLAUDE: ${EARPIECE_INSTALL_CLAUDE:-0}
+    image: earpiece-bridge:latest
+    container_name: earpiece-bridge
+    restart: unless-stopped
+    hostname: ${EARPIECE_NAME}
+    # Run as you, so files Claude Code creates are owned by you and your login is readable.
+    user: "${EARPIECE_UID}:${EARPIECE_GID}"
+    environment:
+      HOME: ${EARPIECE_USER_HOME}
+      USER: ${EARPIECE_USER}
+      EARPIECE_CLAUDE_BIN: ${EARPIECE_CLAUDE_BIN}
+      EARPIECE_NAME: ${EARPIECE_NAME}
+      EARPIECE_DIRECT: "false"
+      DISABLE_AUTOUPDATER: "1"
+      TZ: ${EARPIECE_TZ:-UTC}
+    volumes:
+      # Your home at the same path: your Claude Code login and chats (~/.claude), your
+      # projects, and Earpiece's own data (~/.earpiece). Same path, so chat folders match.
+      - ${EARPIECE_USER_HOME}:${EARPIECE_USER_HOME}
+      # So tools like git and ssh know who you are inside the container.
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+    # Ending a drive sends voice-off to the open chat first; give it time.
+    stop_grace_period: 75s

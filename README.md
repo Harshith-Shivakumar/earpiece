@@ -132,105 +132,85 @@ After the drive, everything is on the server in `~/.earpiece/drives/<date-time>/
 
 ---
 
-## Part 2: move the bridge to your server
+## Part 2: run the bridge on your server
 
-These steps assume a Linux server (Ubuntu or similar) where you log in as your normal user.
+Two ways, both installed by one script. Pick one per server:
 
-### 1. Install Node 22 and Claude Code
+- **Docker:** nothing to install but Docker. Claude Code runs its commands inside the container, which has git, Python 3, Node 22 and build tools, plus your NVIDIA GPUs when the NVIDIA Container Toolkit is present. It edits your real files (your home folder is mounted), but your server's own conda environments and system tools are not inside it.
+- **Direct:** Claude Code uses your server's real tools, environments and GPUs. The script installs Node 22 for your user with nvm (no sudo) and a systemd user service.
 
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
-```
+Requirements for both: Claude Code already installed and logged in on the server (`claude` works in a terminal), and a Linux user whose home holds your projects.
 
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-```
+### 1. Get the code onto the server
 
-### 2. Log Claude Code in
-
-On a server without a browser, create a long-lived token on the server (it shows a link to open on your laptop or phone):
+The repository is private, so either clone it with the GitHub CLI (`gh auth login` once):
 
 ```bash
-~/.local/bin/claude setup-token
+gh repo clone Harshith-Shivakumar/earpiece ~/earpiece
 ```
 
-Follow its instructions; it prints a token. Keep it for the service file in step 5 (`CLAUDE_CODE_OAUTH_TOKEN`). Then check that headless mode works:
+or copy it from your Mac:
 
 ```bash
-CLAUDE_CODE_OAUTH_TOKEN=<token> ~/.local/bin/claude -p "say hi in three words"
+rsync -a --exclude node_modules --exclude .git ~/Downloads/earpiece/ <you>@<server>:~/earpiece/
 ```
 
-### 3. Copy the bridge over
-
-From your laptop:
+### 2. Install (pick one)
 
 ```bash
-rsync -a --exclude node_modules ~/Downloads/earpiece/bridge/ <you>@<server>:~/earpiece-bridge/
-```
-
-### 4. Connect it to the relay
-
-The server reaches the phone through the same Cloudflare relay, so no VPN and no open ports are needed. Create `~/.earpiece/config.json` on the server (the bridge adds its token and id on first start):
-
-```json
-{
-  "relay": "wss://earpiece-relay.<subdomain>.workers.dev",
-  "direct": false,
-  "start_dir": "~/code",
-  "roots": "~/code"
-}
-```
-
-`"direct": false` turns off the bridge's own WebSocket port, so nothing on the server listens for the phone; everything goes through the encrypted relay. Never expose port 8787 to the internet if you turn direct back on.
-
-### 5. Run it as a service (starts on boot, restarts on crash)
-
-Create `/etc/systemd/system/earpiece.service` (replace `<you>` and `<token>`):
-
-```ini
-[Unit]
-Description=Earpiece bridge
-After=network-online.target tailscaled.service
-Wants=network-online.target
-
-[Service]
-User=<you>
-WorkingDirectory=/home/<you>/earpiece-bridge
-Environment=PATH=/home/<you>/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=CLAUDE_CODE_OAUTH_TOKEN=<token>
-ExecStart=/usr/bin/node src/server.js
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
+~/earpiece/server/install.sh docker
 ```
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now earpiece
+~/earpiece/server/install.sh direct
+```
+
+The script:
+
+- checks Claude Code and its login;
+- writes `~/.earpiece/config.json` with the relay address and relay-only mode (nothing listens for the phone on the server);
+- links an `earpiece` command into `~/.local/bin`;
+- builds and starts the container, or installs and starts the service.
+
+In Docker mode, GPUs are added automatically when `nvidia-smi` works (`--no-gpu` turns that off). Edit `start_dir` and `roots` in `~/.earpiece/config.json` to point at your projects, then `earpiece restart`.
+
+For the direct install, so the service keeps running after you log out, run once:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### 3. Pair your phone
+
+```bash
+earpiece pair
+```
+
+Scan the QR code with the iPhone Camera. The server is added as another connection next to your Mac; switch between them at the top of the app. The chat list shows the server's Claude Code chats (everything in the server's `~/.claude/projects`), and continuing one by voice works the same way. At the server's terminal, continue a chat with `claude -c` in its folder.
+
+### 4. Everyday commands
+
+```bash
+earpiece start
 ```
 
 ```bash
-journalctl -u earpiece -f
+earpiece stop
 ```
 
-The service has no terminal, so the QR code is not printed in its log. To pair the phone, show it over SSH (a normal SSH terminal draws it fine):
+Also `earpiece restart`, `earpiece status` and `earpiece logs`. These work the same on the Mac, in Docker and with the direct install.
+
+### 5. Updating
 
 ```bash
-ssh -t <you>@<server> 'cd ~/earpiece-bridge && npm run pair'
+cd ~/earpiece && git pull && earpiece restart
 ```
 
-Scan it with the iPhone Camera app. The server is saved as a second connection next to the laptop.
-
-Set `start_dir` and `roots` in the server's `~/.earpiece/config.json` to where your repos live, then `sudo systemctl restart earpiece`.
-
-### 6. Updating
+In Docker mode, rebuild after pulling instead of restarting:
 
 ```bash
-rsync -a --exclude node_modules ~/Downloads/earpiece/bridge/ <you>@<server>:~/earpiece-bridge/ && ssh <you>@<server> sudo systemctl restart earpiece
+cd ~/earpiece/server && docker compose $(cat ~/.earpiece/compose-files) up -d --build
 ```
-
----
 
 ## Safety notes
 

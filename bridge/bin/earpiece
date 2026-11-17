@@ -1,43 +1,98 @@
 #!/bin/bash
-# Earpiece bridge as a macOS background service (a launchd user agent).
+# Earpiece bridge control, the same commands everywhere:
 #
-#   earpiece start     start the bridge in the background (keeps running without a terminal)
+#   earpiece start     start the bridge in the background
 #   earpiece stop      stop it (sends voice-off to an open chat first, up to ~60 s)
 #   earpiece restart   stop, then start
 #   earpiece status    running or not, plus the bridge's health (relay, state)
 #   earpiece logs      follow the bridge log (Ctrl-C to leave)
 #   earpiece pair      show a pairing QR code for the phone
 #
-# The service file is loaded only when you run "start": nothing starts by itself at login.
-# It restarts the bridge automatically if it crashes, and keeps the Mac from idle-sleeping
-# while it runs (closing the lid still sleeps the Mac; see the README).
+# macOS: a launchd user agent (loaded only by "start"; nothing starts by itself at login).
+# Linux: whatever server/install.sh set up, a Docker container or a systemd user service.
 set -euo pipefail
 
-LABEL="ai.earpiece.bridge"
-BRIDGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SERVICE_DIR="$BRIDGE_DIR/service"
-PLIST="$SERVICE_DIR/$LABEL.plist"
+# Resolve symlinks (install.sh links this script into ~/.local/bin).
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  case "$SRC" in /*) ;; *) SRC="$DIR/$SRC" ;; esac
+done
+BRIDGE_DIR="$(cd -P "$(dirname "$SRC")/.." && pwd)"
 DATA_DIR="${EARPIECE_HOME:-$HOME/.earpiece}"
-LOG="$DATA_DIR/bridge.log"
-DOMAIN="gui/$(id -u)"
 PORT="${EARPIECE_PORT:-8787}"
+CMD="${1:-}"
 
-# First Node 22+ found, preferring Homebrew's (an nvm default may be older).
+usage() { sed -n '2,9p' "$SRC" | sed 's/^# \{0,1\}//'; exit 1; }
+
+# First Node 22+ found, preferring Homebrew's / the installer's choice (an nvm default may be older).
 find_node() {
-  local candidates=(/opt/homebrew/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null || true)")
-  local n
+  local candidates=()
+  [ -s "$DATA_DIR/node" ] && candidates+=("$(cat "$DATA_DIR/node")")
+  candidates+=(/opt/homebrew/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null || true)")
+  local n major
   for n in "${candidates[@]}"; do
     [ -x "$n" ] || continue
-    local major
     major="$("$n" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
     if [ "$major" -ge 22 ] 2>/dev/null; then echo "$n"; return 0; fi
   done
   return 1
 }
 
-is_loaded() { launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
+health_local() { curl -s --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
 
-health() { curl -s --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
+# ---------------------------------------------------------------- Linux: Docker
+docker_mode() {
+  local dir files
+  dir="$(cat "$DATA_DIR/compose-dir")"
+  files="$(cat "$DATA_DIR/compose-files" 2>/dev/null || echo "-f docker-compose.yml")"
+  compose() { (cd "$dir" && docker compose $files "$@"); }
+  health() { docker exec earpiece-bridge curl -s --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
+  case "$CMD" in
+    start) compose up -d; sleep 3; echo "Running. $(health)" ;;
+    stop) echo "Stopping (sends voice-off to an open chat first; can take up to a minute)..."; compose stop; echo "Stopped." ;;
+    restart) compose restart; sleep 3; echo "Running. $(health)" ;;
+    status)
+      if [ "$(docker inspect -f '{{.State.Running}}' earpiece-bridge 2>/dev/null)" = "true" ]; then
+        local h; h="$(health)"
+        if [ -n "$h" ]; then echo "Running. $h"; else echo "Container running, bridge not answering yet. See: earpiece logs"; fi
+      else
+        echo "Not running."
+      fi ;;
+    logs) docker logs --tail 40 -f earpiece-bridge ;;
+    pair) exec docker exec -it earpiece-bridge node bin/pair.js ;;
+    *) usage ;;
+  esac
+}
+
+# ---------------------------------------------------------------- Linux: systemd user service
+systemd_mode() {
+  case "$CMD" in
+    start) systemctl --user start earpiece; sleep 3; echo "Running. $(health_local)" ;;
+    stop) echo "Stopping (sends voice-off to an open chat first; can take up to a minute)..."; systemctl --user stop earpiece; echo "Stopped." ;;
+    restart) systemctl --user restart earpiece; sleep 3; echo "Running. $(health_local)" ;;
+    status)
+      if systemctl --user is-active --quiet earpiece; then
+        local h; h="$(health_local)"
+        if [ -n "$h" ]; then echo "Running. $h"; else echo "Service running, bridge not answering yet. See: earpiece logs"; fi
+      else
+        echo "Not running."
+      fi ;;
+    logs) journalctl --user -u earpiece -n 40 -f ;;
+    pair) local node; node="$(find_node)" || { echo "Node 22+ needed." >&2; exit 1; }; cd "$BRIDGE_DIR" && exec "$node" bin/pair.js ;;
+    *) usage ;;
+  esac
+}
+
+# ---------------------------------------------------------------- macOS: launchd user agent
+LABEL="ai.earpiece.bridge"
+SERVICE_DIR="$BRIDGE_DIR/service"
+PLIST="$SERVICE_DIR/$LABEL.plist"
+LOG="$DATA_DIR/bridge.log"
+DOMAIN="gui/$(id -u)"
+
+is_loaded() { launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
 
 write_plist() {
   local node
@@ -79,8 +134,17 @@ PLIST
   chmod 644 "$PLIST"
 }
 
-cmd_start() {
-  if is_loaded; then echo "Earpiece bridge is already running."; cmd_status; return 0; fi
+mac_status() {
+  if is_loaded; then
+    local h; h="$(health_local)"
+    if [ -n "$h" ]; then echo "Running. $h"; else echo "Loaded but not answering yet. See: earpiece logs"; fi
+  else
+    echo "Not running."
+  fi
+}
+
+mac_start() {
+  if is_loaded; then echo "Earpiece bridge is already running."; mac_status; return 0; fi
   if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Port $PORT is already in use (is the bridge running in a terminal? stop that one first)." >&2
     exit 1
@@ -89,14 +153,14 @@ cmd_start() {
   launchctl bootstrap "$DOMAIN" "$PLIST"
   local i
   for i in $(seq 1 20); do
-    if [ -n "$(health)" ]; then break; fi
+    [ -n "$(health_local)" ] && break
     sleep 0.5
   done
   echo "Earpiece bridge started."
-  cmd_status
+  mac_status
 }
 
-cmd_stop() {
+mac_stop() {
   if ! is_loaded; then echo "Earpiece bridge is not running."; return 0; fi
   echo "Stopping (sends voice-off to an open chat first; can take up to a minute)..."
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
@@ -108,29 +172,23 @@ cmd_stop() {
   echo "Earpiece bridge stopped."
 }
 
-cmd_status() {
-  if is_loaded; then
-    local h
-    h="$(health)"
-    if [ -n "$h" ]; then
-      echo "Running. $h"
-    else
-      echo "Loaded but not answering yet. See: earpiece logs"
-    fi
-  else
-    echo "Not running."
-  fi
+mac_mode() {
+  case "$CMD" in
+    start) mac_start ;;
+    stop) mac_stop ;;
+    restart) mac_stop; mac_start ;;
+    status) mac_status ;;
+    logs) mkdir -p "$DATA_DIR"; touch "$LOG"; tail -n 40 -f "$LOG" ;;
+    pair) local node; node="$(find_node)" || { echo "Node 22+ needed." >&2; exit 1; }; cd "$BRIDGE_DIR" && exec "$node" bin/pair.js ;;
+    *) usage ;;
+  esac
 }
 
-case "${1:-}" in
-  start) cmd_start ;;
-  stop) cmd_stop ;;
-  restart) cmd_stop; cmd_start ;;
-  status) cmd_status ;;
-  logs) mkdir -p "$DATA_DIR"; touch "$LOG"; tail -n 40 -f "$LOG" ;;
-  pair) node="$(find_node)" || { echo "Node 22+ needed." >&2; exit 1; }; cd "$BRIDGE_DIR" && exec "$node" bin/pair.js ;;
-  *)
-    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
-    exit 1
-    ;;
-esac
+[ -n "$CMD" ] || usage
+if [ "$(uname -s)" = "Darwin" ]; then
+  mac_mode
+elif [ "$(cat "$DATA_DIR/mode" 2>/dev/null)" = "docker" ]; then
+  docker_mode
+else
+  systemd_mode
+fi
