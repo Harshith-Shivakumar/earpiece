@@ -1,0 +1,14 @@
+{
+  "name": "earpiece-relay",
+  "version": "0.1.0",
+  "description": "Earpiece relay: forwards end-to-end encrypted traffic between the iPhone app and the bridge. Node server and Cloudflare Worker share one core.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node node/server.js",
+    "test": "node --test 'test/*.test.js'"
+  }
+}

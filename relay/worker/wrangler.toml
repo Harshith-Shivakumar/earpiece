@@ -1,0 +1,24 @@
+# Earpiece relay on Cloudflare Workers (free plan). Deploy from this folder:
+#   npx wrangler login
+#   npx wrangler deploy
+# Wrangler bundles index.js together with ../core; nothing it installs ships in the relay.
+
+name = "earpiece-relay"
+main = "index.js"
+compatibility_date = "2025-10-01"
+workers_dev = true
+
+# One Durable Object per bridge_id, holding that bridge's sockets and its TOFU key.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "BridgeRoom"
+
+# SQLite-backed Durable Objects are the ones available on the Workers free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BridgeRoom"]
+
+# Workers Logs: keeps the relay's metadata-only logs (connection counts, byte counts,
+# rate-limit hits). Payloads are never logged.
+[observability]
+enabled = true

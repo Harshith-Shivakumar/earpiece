@@ -1,0 +1,16 @@
+# Dependencies and build output
+node_modules/
+build/
+DerivedData/
+
+# Generated per machine
+bridge/service/
+relay/worker/.wrangler/
+relay/.wrangler/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+
+# OS
+.DS_Store

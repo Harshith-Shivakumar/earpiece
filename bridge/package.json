@@ -1,0 +1,24 @@
+{
+  "name": "earpiece-bridge",
+  "version": "0.1.0",
+  "description": "Earpiece bridge: runs Claude Code headless and talks to the Earpiece iPhone app over a WebSocket.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "earpiece-bridge": "src/server.js",
+    "earpiece-talk": "bin/talk.js",
+    "earpiece-pair": "bin/pair.js",
+    "earpiece-phones": "bin/phones.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test 'test/*.test.js'",
+    "talk": "node bin/talk.js",
+    "pair": "node bin/pair.js",
+    "phones": "node bin/phones.js",
+    "unpair": "node bin/phones.js unpair"
+  }
+}

@@ -1,0 +1,136 @@
+#!/bin/bash
+# Earpiece bridge as a macOS background service (a launchd user agent).
+#
+#   earpiece start     start the bridge in the background (keeps running without a terminal)
+#   earpiece stop      stop it (sends voice-off to an open chat first, up to ~60 s)
+#   earpiece restart   stop, then start
+#   earpiece status    running or not, plus the bridge's health (relay, state)
+#   earpiece logs      follow the bridge log (Ctrl-C to leave)
+#   earpiece pair      show a pairing QR code for the phone
+#
+# The service file is loaded only when you run "start": nothing starts by itself at login.
+# It restarts the bridge automatically if it crashes, and keeps the Mac from idle-sleeping
+# while it runs (closing the lid still sleeps the Mac; see the README).
+set -euo pipefail
+
+LABEL="ai.earpiece.bridge"
+BRIDGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SERVICE_DIR="$BRIDGE_DIR/service"
+PLIST="$SERVICE_DIR/$LABEL.plist"
+DATA_DIR="${EARPIECE_HOME:-$HOME/.earpiece}"
+LOG="$DATA_DIR/bridge.log"
+DOMAIN="gui/$(id -u)"
+PORT="${EARPIECE_PORT:-8787}"
+
+# First Node 22+ found, preferring Homebrew's (an nvm default may be older).
+find_node() {
+  local candidates=(/opt/homebrew/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null || true)")
+  local n
+  for n in "${candidates[@]}"; do
+    [ -x "$n" ] || continue
+    local major
+    major="$("$n" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    if [ "$major" -ge 22 ] 2>/dev/null; then echo "$n"; return 0; fi
+  done
+  return 1
+}
+
+is_loaded() { launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
+
+health() { curl -s --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
+
+write_plist() {
+  local node
+  if ! node="$(find_node)"; then
+    echo "Earpiece needs Node 22 or newer. Install it (brew install node@22, or nvm install 22) and try again." >&2
+    exit 1
+  fi
+  mkdir -p "$SERVICE_DIR" "$DATA_DIR"
+  cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>$node</string>
+    <string>$BRIDGE_DIR/src/server.js</string>
+  </array>
+  <key>WorkingDirectory</key><string>$BRIDGE_DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$HOME/.local/bin:$(dirname "$node"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ExitTimeOut</key><integer>70</integer>
+  <key>StandardOutPath</key><string>$LOG</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
+</dict>
+</plist>
+PLIST
+  chmod 644 "$PLIST"
+}
+
+cmd_start() {
+  if is_loaded; then echo "Earpiece bridge is already running."; cmd_status; return 0; fi
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port $PORT is already in use (is the bridge running in a terminal? stop that one first)." >&2
+    exit 1
+  fi
+  write_plist
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+  local i
+  for i in $(seq 1 20); do
+    if [ -n "$(health)" ]; then break; fi
+    sleep 0.5
+  done
+  echo "Earpiece bridge started."
+  cmd_status
+}
+
+cmd_stop() {
+  if ! is_loaded; then echo "Earpiece bridge is not running."; return 0; fi
+  echo "Stopping (sends voice-off to an open chat first; can take up to a minute)..."
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  local i
+  for i in $(seq 1 140); do
+    is_loaded || break
+    sleep 0.5
+  done
+  echo "Earpiece bridge stopped."
+}
+
+cmd_status() {
+  if is_loaded; then
+    local h
+    h="$(health)"
+    if [ -n "$h" ]; then
+      echo "Running. $h"
+    else
+      echo "Loaded but not answering yet. See: earpiece logs"
+    fi
+  else
+    echo "Not running."
+  fi
+}
+
+case "${1:-}" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status) cmd_status ;;
+  logs) mkdir -p "$DATA_DIR"; touch "$LOG"; tail -n 40 -f "$LOG" ;;
+  pair) node="$(find_node)" || { echo "Node 22+ needed." >&2; exit 1; }; cd "$BRIDGE_DIR" && exec "$node" bin/pair.js ;;
+  *)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac
